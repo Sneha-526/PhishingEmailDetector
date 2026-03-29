@@ -1,0 +1,578 @@
+/* ============================================================
+   Phishing Email Detector — style.css
+   Author: Risk & Compliance Demo Project
+   Description: Modern dark-mode UI with glassmorphism effects
+   ============================================================ */
+
+/* ── 1. CSS Custom Properties (Design Tokens) ─────────────── */
+:root {
+  /* Brand palette */
+  --clr-bg:           #0a0d18;
+  --clr-surface:      #111627;
+  --clr-surface-2:    #171f38;
+  --clr-border:       rgba(255, 255, 255, 0.08);
+  --clr-border-hover: rgba(255, 255, 255, 0.18);
+
+  /* Accent */
+  --clr-accent:       #6c63ff;
+  --clr-accent-glow:  rgba(108, 99, 255, 0.35);
+  --clr-accent-light: #8b85ff;
+
+  /* Status colours */
+  --clr-safe:         #22c55e;   /* green  */
+  --clr-safe-bg:      rgba(34, 197, 94, 0.12);
+  --clr-warn:         #f59e0b;   /* yellow */
+  --clr-warn-bg:      rgba(245, 158, 11, 0.12);
+  --clr-danger:       #ef4444;   /* red    */
+  --clr-danger-bg:    rgba(239, 68, 68, 0.12);
+
+  /* Highlight colour for suspicious words */
+  --clr-highlight:    rgba(239, 68, 68, 0.28);
+  --clr-highlight-border: rgba(239, 68, 68, 0.7);
+
+  /* Typography */
+  --clr-text:         #e2e8f0;
+  --clr-text-muted:   #8892a4;
+  --font-sans:        'Segoe UI', system-ui, -apple-system, sans-serif;
+
+  /* Spacing / Radius */
+  --radius-sm:  6px;
+  --radius-md:  12px;
+  --radius-lg:  20px;
+  --radius-xl:  28px;
+
+  /* Transitions */
+  --transition: 0.22s ease;
+}
+
+/* ── 2. Reset & Base ──────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+  font-size: 16px;
+}
+
+body {
+  min-height: 100vh;
+  background-color: var(--clr-bg);
+  color: var(--clr-text);
+  font-family: var(--font-sans);
+  line-height: 1.6;
+  overflow-x: hidden;
+  padding: 2rem 1rem 4rem;
+  position: relative;
+}
+
+/* ── 3. Ambient Background Blobs ─────────────────────────── */
+.blob {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(120px);
+  pointer-events: none;
+  opacity: 0.45;
+  z-index: 0;
+}
+
+.blob-1 {
+  width: 520px;
+  height: 520px;
+  background: radial-gradient(circle, #6c63ff 0%, transparent 70%);
+  top: -180px;
+  left: -140px;
+  animation: floatBlob 14s ease-in-out infinite alternate;
+}
+
+.blob-2 {
+  width: 440px;
+  height: 440px;
+  background: radial-gradient(circle, #e879f9 0%, transparent 70%);
+  bottom: -160px;
+  right: -100px;
+  animation: floatBlob 18s ease-in-out infinite alternate-reverse;
+}
+
+@keyframes floatBlob {
+  from { transform: translate(0, 0) scale(1); }
+  to   { transform: translate(30px, 20px) scale(1.06); }
+}
+
+/* ── 4. Layout Container ─────────────────────────────────── */
+.container {
+  position: relative;
+  z-index: 1;
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+/* ── 5. Header ───────────────────────────────────────────── */
+.header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.5rem 0 0.5rem;
+}
+
+.header-icon {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, var(--clr-accent), #e879f9);
+  flex-shrink: 0;
+  box-shadow: 0 0 24px var(--clr-accent-glow);
+  animation: pulseGlow 3s ease-in-out infinite;
+}
+
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 20px var(--clr-accent-glow); }
+  50%       { box-shadow: 0 0 40px var(--clr-accent-glow), 0 0 60px rgba(232,121,249,0.25); }
+}
+
+.header-icon svg {
+  color: #fff;
+}
+
+.header-title {
+  font-size: clamp(1.4rem, 4vw, 2rem);
+  font-weight: 800;
+  background: linear-gradient(135deg, #fff 30%, var(--clr-accent-light));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: -0.02em;
+}
+
+.header-subtitle {
+  color: var(--clr-text-muted);
+  font-size: 0.88rem;
+  margin-top: 0.15rem;
+  letter-spacing: 0.01em;
+}
+
+/* ── 6. Card ─────────────────────────────────────────────── */
+.card {
+  background: rgba(17, 22, 39, 0.7);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid var(--clr-border);
+  border-radius: var(--radius-xl);
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
+  transition: border-color var(--transition);
+}
+
+.card:hover {
+  border-color: var(--clr-border-hover);
+}
+
+/* ── 7. Input Section ────────────────────────────────────── */
+.input-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.textarea-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--clr-text-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.textarea-wrapper {
+  border: 1px solid var(--clr-border);
+  border-radius: var(--radius-md);
+  background: var(--clr-surface);
+  transition: border-color var(--transition), box-shadow var(--transition);
+  overflow: hidden;
+}
+
+.textarea-wrapper:focus-within {
+  border-color: var(--clr-accent);
+  box-shadow: 0 0 0 3px var(--clr-accent-glow);
+}
+
+.email-textarea {
+  width: 100%;
+  min-height: 220px;
+  padding: 1rem 1.2rem;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: vertical;
+  font-family: 'Courier New', 'Consolas', monospace;
+  font-size: 0.92rem;
+  color: var(--clr-text);
+  line-height: 1.65;
+}
+
+.email-textarea::placeholder {
+  color: var(--clr-text-muted);
+  opacity: 0.7;
+}
+
+/* Custom scrollbar for textarea */
+.email-textarea::-webkit-scrollbar { width: 6px; }
+.email-textarea::-webkit-scrollbar-track { background: transparent; }
+.email-textarea::-webkit-scrollbar-thumb {
+  background: rgba(108, 99, 255, 0.4);
+  border-radius: 99px;
+}
+
+.textarea-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.4rem 0.9rem 0.4rem 1.2rem;
+  border-top: 1px solid var(--clr-border);
+  background: var(--clr-surface-2);
+}
+
+.char-counter {
+  font-size: 0.78rem;
+  color: var(--clr-text-muted);
+}
+
+/* ── 8. Buttons ──────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 1.1rem;
+  border: none;
+  border-radius: var(--radius-md);
+  font-family: var(--font-sans);
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition), transform var(--transition), box-shadow var(--transition);
+  user-select: none;
+}
+
+/* Ghost button (Clear) */
+.btn-ghost {
+  background: transparent;
+  color: var(--clr-text-muted);
+  border: 1px solid transparent;
+}
+
+.btn-ghost:hover {
+  background: rgba(255,255,255,0.06);
+  color: var(--clr-text);
+  border-color: var(--clr-border);
+}
+
+/* Primary button (Analyze) */
+.action-row {
+  display: flex;
+  justify-content: center;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--clr-accent), #a855f7);
+  color: #fff;
+  font-size: 1rem;
+  padding: 0.85rem 2.4rem;
+  border-radius: var(--radius-lg);
+  box-shadow: 0 4px 20px var(--clr-accent-glow);
+  letter-spacing: 0.01em;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-primary::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255,255,255,0.15), transparent);
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 32px var(--clr-accent-glow), 0 0 0 1px rgba(255,255,255,0.1);
+}
+
+.btn-primary:hover::before {
+  opacity: 1;
+}
+
+.btn-primary:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 10px var(--clr-accent-glow);
+}
+
+.btn-icon {
+  font-size: 1.15rem;
+}
+
+/* Loading spin state */
+.btn-primary.loading {
+  pointer-events: none;
+  opacity: 0.75;
+}
+
+/* ── 9. Result Section ───────────────────────────────────── */
+.result-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  animation: fadeSlideIn 0.5s ease;
+}
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ── 10. Risk Badge ──────────────────────────────────────── */
+.risk-badge {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid;
+  transition: background var(--transition), border-color var(--transition);
+}
+
+.risk-badge.safe {
+  background: var(--clr-safe-bg);
+  border-color: rgba(34, 197, 94, 0.3);
+}
+
+.risk-badge.warn {
+  background: var(--clr-warn-bg);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.risk-badge.danger {
+  background: var(--clr-danger-bg);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.risk-icon {
+  font-size: 2.2rem;
+  flex-shrink: 0;
+}
+
+.risk-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--clr-text-muted);
+  margin-bottom: 0.1rem;
+}
+
+.risk-level-text {
+  font-size: 1.3rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.risk-badge.safe  .risk-level-text { color: var(--clr-safe); }
+.risk-badge.warn  .risk-level-text { color: var(--clr-warn); }
+.risk-badge.danger .risk-level-text { color: var(--clr-danger); }
+
+/* Score circle */
+.score-circle {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 70px;
+  height: 70px;
+  border-radius: 50%;
+  border: 3px solid;
+  flex-shrink: 0;
+}
+
+.risk-badge.safe   .score-circle { border-color: var(--clr-safe); }
+.risk-badge.warn   .score-circle { border-color: var(--clr-warn); }
+.risk-badge.danger .score-circle { border-color: var(--clr-danger); }
+
+.score-value {
+  font-size: 1.3rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.risk-badge.safe   .score-value { color: var(--clr-safe); }
+.risk-badge.warn   .score-value { color: var(--clr-warn); }
+.risk-badge.danger .score-value { color: var(--clr-danger); }
+
+.score-sub {
+  font-size: 0.65rem;
+  color: var(--clr-text-muted);
+}
+
+/* ── 11. Summary Box ─────────────────────────────────────── */
+.summary-box {
+  background: var(--clr-surface);
+  border: 1px solid var(--clr-border);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.25rem;
+}
+
+.summary-text {
+  font-size: 0.95rem;
+  color: var(--clr-text-muted);
+  line-height: 1.7;
+}
+
+/* ── 12. Breakdown Section ───────────────────────────────── */
+.section-heading {
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--clr-text-muted);
+  margin-bottom: 0.9rem;
+}
+
+.issues-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.issue-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  padding: 0.75rem 1rem;
+  background: var(--clr-surface);
+  border: 1px solid var(--clr-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.9rem;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+.issue-icon { flex-shrink: 0; font-size: 1.1rem; }
+
+.issue-text { color: var(--clr-text); line-height: 1.4; }
+
+/* ── 13. Highlighted Email Preview ──────────────────────── */
+.highlighted-email {
+  background: var(--clr-surface);
+  border: 1px solid var(--clr-border);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.2rem;
+  font-family: 'Courier New', 'Consolas', monospace;
+  font-size: 0.88rem;
+  line-height: 1.7;
+  color: var(--clr-text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+/* Custom scrollbar */
+.highlighted-email::-webkit-scrollbar { width: 5px; }
+.highlighted-email::-webkit-scrollbar-track { background: transparent; }
+.highlighted-email::-webkit-scrollbar-thumb {
+  background: rgba(239, 68, 68, 0.35);
+  border-radius: 99px;
+}
+
+/* Highlighted words inside the preview */
+.highlighted-email mark {
+  background: var(--clr-highlight);
+  color: #fca5a5;
+  border-bottom: 1px solid var(--clr-highlight-border);
+  border-radius: 2px;
+  padding: 0 2px;
+  font-style: normal;
+}
+
+/* ── 14. Suggestions Section ─────────────────────────────── */
+.suggestions-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.suggestion-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.65rem 1rem;
+  background: linear-gradient(135deg, rgba(108,99,255,0.08), rgba(168,85,247,0.05));
+  border: 1px solid rgba(108,99,255,0.2);
+  border-radius: var(--radius-sm);
+  font-size: 0.88rem;
+  color: var(--clr-text);
+  animation: fadeIn 0.35s ease;
+}
+
+.suggestion-icon { font-size: 1rem; flex-shrink: 0; }
+
+/* ── 15. Footer ─────────────────────────────────────────── */
+.footer {
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--clr-text-muted);
+  opacity: 0.6;
+  padding-bottom: 1rem;
+}
+
+/* ── 16. Divider utility ─────────────────────────────────── */
+.divider {
+  height: 1px;
+  background: var(--clr-border);
+  border: none;
+}
+
+/* ── 17. Responsive ──────────────────────────────────────── */
+@media (max-width: 600px) {
+  body { padding: 1rem 0.75rem 3rem; }
+
+  .header { flex-direction: column; text-align: center; }
+
+  .card { padding: 1.4rem 1.2rem; gap: 1.4rem; }
+
+  .risk-badge {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  .score-circle {
+    margin-left: 0;
+  }
+
+  .btn-primary {
+    width: 100%;
+    justify-content: center;
+    padding: 0.95rem 1rem;
+  }
+
+  .email-textarea { min-height: 160px; }
+}

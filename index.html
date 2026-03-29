@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Phishing Email Detector – Analyze email content for phishing attempts using rule-based detection. Built for cybersecurity awareness." />
+  <title>Phishing Email Detector</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ===== Background ambient blobs ===== -->
+  <div class="blob blob-1" aria-hidden="true"></div>
+  <div class="blob blob-2" aria-hidden="true"></div>
+
+  <div class="container">
+
+    <!-- ===== Header ===== -->
+    <header class="header">
+      <div class="header-icon" aria-hidden="true">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="36" height="36">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          <line x1="12" y1="8" x2="12" y2="12"/>
+          <line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+      </div>
+      <div>
+        <h1 class="header-title">Phishing Email Detector</h1>
+        <p class="header-subtitle">AI-style rule-based analysis for cybersecurity awareness</p>
+      </div>
+    </header>
+
+    <!-- ===== Main card ===== -->
+    <main class="card">
+
+      <!-- Email Input Section -->
+      <section class="input-section" aria-labelledby="input-label">
+        <label id="input-label" class="textarea-label" for="emailInput">
+          📧 Paste Email Content Below
+        </label>
+        <div class="textarea-wrapper">
+          <textarea
+            id="emailInput"
+            class="email-textarea"
+            placeholder="Paste the full body of the email here — including subject, sender info, links, and message content..."
+            spellcheck="false"
+            aria-describedby="char-counter"
+          ></textarea>
+          <div class="textarea-footer">
+            <span id="char-counter" class="char-counter">0 characters</span>
+            <button id="clearBtn" class="btn btn-ghost" type="button" aria-label="Clear email input">
+              ✕ Clear
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Action Button -->
+      <div class="action-row">
+        <button id="analyzeBtn" class="btn btn-primary" type="button" aria-label="Analyze the pasted email">
+          <span class="btn-icon">🔍</span>
+          Analyze Email
+        </button>
+      </div>
+
+      <!-- Result Section (hidden until analysis runs) -->
+      <section id="resultSection" class="result-section hidden" aria-live="polite" aria-atomic="true">
+
+        <!-- Risk Badge -->
+        <div id="riskBadge" class="risk-badge">
+          <span id="riskIcon" class="risk-icon" aria-hidden="true"></span>
+          <div>
+            <p class="risk-label">Risk Level</p>
+            <p id="riskLevel" class="risk-level-text"></p>
+          </div>
+          <div id="scoreCircle" class="score-circle" aria-label="Phishing score">
+            <span id="scoreValue" class="score-value"></span>
+            <span class="score-sub">/ 10</span>
+          </div>
+        </div>
+
+        <!-- Summary Explanation -->
+        <div id="summaryBox" class="summary-box">
+          <p id="summaryText" class="summary-text"></p>
+        </div>
+
+        <!-- Issues Breakdown -->
+        <div id="breakdownSection" class="breakdown-section">
+          <h2 class="section-heading">⚠️ Detected Issues</h2>
+          <ul id="issuesList" class="issues-list"></ul>
+        </div>
+
+        <!-- Highlighted Email Preview -->
+        <div id="highlightSection" class="highlight-section">
+          <h2 class="section-heading">🔎 Highlighted Email Preview</h2>
+          <div id="highlightedEmail" class="highlighted-email" aria-label="Email content with suspicious words highlighted"></div>
+        </div>
+
+        <!-- Suggestions -->
+        <div class="suggestions-section">
+          <h2 class="section-heading">💡 Recommendations</h2>
+          <ul id="suggestionsList" class="suggestions-list"></ul>
+        </div>
+
+      </section>
+
+    </main>
+
+    <!-- ===== Footer ===== -->
+    <footer class="footer">
+      <p>Built for cybersecurity awareness · Risk &amp; Compliance demo project</p>
+    </footer>
+
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
