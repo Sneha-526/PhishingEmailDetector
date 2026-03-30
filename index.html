@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="Phishing Email Detector – Analyze email content for phishing attempts using rule-based detection. Built for cybersecurity awareness." />
+  <meta name="description" content="Phishing Email Detector – AI-powered hybrid analysis using DistilBERT + rule-based detection for cybersecurity awareness." />
   <title>Phishing Email Detector</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -27,9 +27,11 @@
       </div>
       <div>
         <h1 class="header-title">Phishing Email Detector</h1>
-        <p class="header-subtitle">AI-style rule-based analysis for cybersecurity awareness</p>
+        <p class="header-subtitle">AI-powered phishing detection · Runs entirely in your browser · No data shared</p>
       </div>
     </header>
+
+
 
     <!-- ===== Main card ===== -->
     <main class="card">
@@ -85,6 +87,44 @@
           <p id="summaryText" class="summary-text"></p>
         </div>
 
+        <!-- Score Breakdown Panel -->
+        <div id="scoreBreakdownPanel" class="breakdown-panel hidden">
+          <h2 class="section-heading">📊 How We Calculated Your Risk Score</h2>
+
+          <!-- Rule Engine row -->
+          <div id="ruleScoreRow" class="breakdown-row">
+            <div class="breakdown-label-row">
+              <span class="breakdown-label">🔍 Suspicious Pattern Check <span class="breakdown-hint">(keywords, links, external domains, formatting)</span></span>
+              <span id="ruleScoreVal" class="breakdown-val"></span>
+            </div>
+            <div class="breakdown-track">
+              <div id="ruleScoreBar" class="breakdown-bar"></div>
+            </div>
+          </div>
+
+          <!-- AI row -->
+          <div id="aiScoreRow" class="breakdown-row hidden">
+            <div class="breakdown-label-row">
+              <span class="breakdown-label">🧠 AI Language Analysis <span class="breakdown-hint">(reads the overall tone)</span></span>
+              <span id="aiScoreVal" class="breakdown-val"></span>
+            </div>
+            <div class="breakdown-track">
+              <div id="aiScoreBar" class="breakdown-bar"></div>
+            </div>
+          </div>
+
+          <!-- Hybrid row -->
+          <div id="hybridScoreRow" class="breakdown-row breakdown-row--final">
+            <div class="breakdown-label-row">
+              <span class="breakdown-label">⚡ Overall Risk Score <span class="breakdown-hint">(combined result)</span></span>
+              <span id="hybridScoreVal" class="breakdown-val"></span>
+            </div>
+            <div class="breakdown-track">
+              <div id="hybridScoreBar" class="breakdown-bar"></div>
+            </div>
+          </div>
+        </div>
+
         <!-- Issues Breakdown -->
         <div id="breakdownSection" class="breakdown-section">
           <h2 class="section-heading">⚠️ Detected Issues</h2>
@@ -109,11 +149,12 @@
 
     <!-- ===== Footer ===== -->
     <footer class="footer">
-      <p>Built for cybersecurity awareness · Risk &amp; Compliance demo project</p>
+      <p>Powered by DistilBERT (Transformers.js) + Rule Engine · Runs entirely in your browser · No data leaves your device</p>
     </footer>
 
   </div>
 
-  <script src="script.js"></script>
+  <!-- Load script as module to support Web Workers with ES module worker -->
+  <script type="module" src="script.js"></script>
 </body>
 </html>

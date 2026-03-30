@@ -1,19 +1,19 @@
 /**
- * Phishing Email Detector — script.js
- * ====================================
- * Rule-based phishing detection engine + UI controller.
+ * Phishing Email Detector — script.js  (v2 – DistilBERT Hybrid)
+ * =============================================================
+ * Two-layer detection engine:
  *
- * Detection rules assign weighted scores across categories:
- *   1. Suspicious keywords          (up to +4 pts)
- *   2. URL / link presence          (up to +2 pts)
- *   3. Excessive uppercase letters  (up to +1.5 pts)
- *   4. Multiple exclamation marks   (up to +1 pt)
- *   5. Sensitive information requests (up to +2 pts)
+ *   Layer 1 – Rule Engine  (synchronous, instant)
+ *     Keyword patterns, URL detection, uppercase/exclamation heuristics,
+ *     and sensitive-info pattern matching.  Score 0–10.
  *
- * Total score range: 0 – 10
- *   0 – 3   → Safe       (Low Risk)
- *   3.1 – 6  → Suspicious (Medium Risk)
- *   6.1 – 10 → Phishing   (High Risk)
+ *   Layer 2 – DistilBERT AI  (async, Web Worker + Transformers.js)
+ *     Runs `Xenova/distilbert-base-uncased-finetuned-sst-2-english`
+ *     entirely in-browser (ONNX Runtime).  Maps NEGATIVE sentiment
+ *     confidence → phishing confidence 0–1 → scaled to 0–10.
+ *
+ *   Hybrid Final Score = 55 % Rule + 45 % AI  (when AI is ready)
+ *   Falls back to 100 % Rule score when model is loading or fails.
  */
 
 'use strict';
@@ -22,17 +22,6 @@
    1. Detection Rules Configuration
    ============================================================ */
 
-/**
- * @typedef {Object} Rule
- * @property {string}   id          - Unique rule identifier
- * @property {string}   label       - Human-readable label for the Issues panel
- * @property {string}   icon        - Emoji icon shown next to the issue
- * @property {RegExp}   pattern     - Regex to test against email text
- * @property {number}   score       - Points added to phishing score when matched
- * @property {string}   suggestion  - Recommendation shown in the suggestions panel
- */
-
-/** Suspicious urgency / action keywords */
 const KEYWORD_RULES = [
   { keyword: 'urgent',              score: 0.8, label: 'Urgency language detected ("urgent")' },
   { keyword: 'click here',         score: 0.9, label: 'Deceptive call-to-action ("click here")' },
@@ -52,7 +41,6 @@ const KEYWORD_RULES = [
   { keyword: 'claim your',         score: 0.7, label: 'Prize-claiming language detected' },
 ];
 
-/** Sensitive information request patterns */
 const SENSITIVE_PATTERNS = [
   { pattern: /social\s+security/i,                   score: 1.0, label: 'Request for Social Security Number (SSN)' },
   { pattern: /credit\s+card/i,                       score: 1.0, label: 'Request for credit card details' },
@@ -63,226 +51,412 @@ const SENSITIVE_PATTERNS = [
   { pattern: /login\s*(credentials|info)/i,          score: 0.9, label: 'Login credentials request detected' },
 ];
 
+/** High-risk / free TLDs frequently abused in phishing */
+const SUSPICIOUS_TLDS = [
+  '.tk', '.ml', '.ga', '.cf', '.gq',   // free Freenom TLDs
+  '.xyz', '.top', '.win', '.racing',    // cheap abuse-prone TLDs
+  '.download', '.loan', '.stream',      // common malware TLDs
+  '.click', '.link', '.work', '.gdn',
+];
+
+/** Common URL-shortening services used to hide true destinations */
+const URL_SHORTENERS = [
+  'bit.ly', 'tinyurl.com', 'goo.gl', 't.co', 'ow.ly',
+  'is.gd', 'buff.ly', 'adf.ly', 'short.link', 'rb.gy',
+  'cutt.ly', 'shorturl.at', 'tiny.cc', 'su.pr',
+];
+
+/** Brand names commonly impersonated in lookalike domains */
+const LOOKALIKE_BRANDS = [
+  'paypal', 'amazon', 'apple', 'microsoft', 'google',
+  'netflix', 'facebook', 'instagram', 'twitter', 'linkedin',
+  'dropbox', 'docusign', 'wellsfargo', 'bankofamerica', 'chase',
+  'dhl', 'fedex', 'ups', 'usps', 'irs',
+];
+
 /* ============================================================
    2. DOM Element References
    ============================================================ */
-const emailInput      = document.getElementById('emailInput');
-const analyzeBtn      = document.getElementById('analyzeBtn');
-const clearBtn        = document.getElementById('clearBtn');
-const charCounter     = document.getElementById('char-counter');
-const resultSection   = document.getElementById('resultSection');
-const riskBadge       = document.getElementById('riskBadge');
-const riskIcon        = document.getElementById('riskIcon');
-const riskLevel       = document.getElementById('riskLevel');
-const scoreValue      = document.getElementById('scoreValue');
-const scoreCircle     = document.getElementById('scoreCircle');
-const summaryText     = document.getElementById('summaryText');
-const issuesList      = document.getElementById('issuesList');
-const highlightedEmail= document.getElementById('highlightedEmail');
-const suggestionsList = document.getElementById('suggestionsList');
+const emailInput       = document.getElementById('emailInput');
+const analyzeBtn       = document.getElementById('analyzeBtn');
+const clearBtn         = document.getElementById('clearBtn');
+const charCounter      = document.getElementById('char-counter');
+const resultSection    = document.getElementById('resultSection');
+const riskBadge        = document.getElementById('riskBadge');
+const riskIcon         = document.getElementById('riskIcon');
+const riskLevel        = document.getElementById('riskLevel');
+const scoreValue       = document.getElementById('scoreValue');
+const summaryText      = document.getElementById('summaryText');
+const issuesList       = document.getElementById('issuesList');
+const highlightedEmail = document.getElementById('highlightedEmail');
+const suggestionsList  = document.getElementById('suggestionsList');
+const aiScoreRow       = document.getElementById('aiScoreRow');
+const ruleScoreRow     = document.getElementById('ruleScoreRow');
+const hybridScoreRow   = document.getElementById('hybridScoreRow');
+const aiScoreBar       = document.getElementById('aiScoreBar');
+const ruleScoreBar     = document.getElementById('ruleScoreBar');
+const hybridScoreBar   = document.getElementById('hybridScoreBar');
+const aiScoreVal       = document.getElementById('aiScoreVal');
+const ruleScoreVal     = document.getElementById('ruleScoreVal');
+const hybridScoreVal   = document.getElementById('hybridScoreVal');
+const breakdownPanel   = document.getElementById('scoreBreakdownPanel');
 
 /* ============================================================
-   3. Utility Helpers
+   3. Web Worker — DistilBERT
    ============================================================ */
 
+/** @type {Worker|null} */
+let modelWorker = null;
+let modelReady  = false;
+let requestId   = 0;
+
+/** Pending promise resolvers keyed by request id */
+const pendingRequests = new Map();
+
+function initWorker() {
+  try {
+    modelWorker = new Worker('model-worker.js', { type: 'module' });
+
+    modelWorker.addEventListener('message', (e) => {
+      const msg = e.data;
+
+      switch (msg.type) {
+        case 'progress':
+          setModelStatus('loading', msg.message);
+          break;
+
+        case 'ready':
+          modelReady = true;
+          setModelStatus('ready', 'DistilBERT model ready');
+          break;
+
+        case 'result': {
+          const resolver = pendingRequests.get(msg.id);
+          if (resolver) {
+            resolver.resolve(msg);
+            pendingRequests.delete(msg.id);
+          }
+          break;
+        }
+
+        case 'error': {
+          if (msg.id === -1) {
+            // Boot error
+            setModelStatus('error', 'Model failed to load');
+            return;
+          }
+          const resolver = pendingRequests.get(msg.id);
+          if (resolver) {
+            resolver.reject(new Error(msg.message));
+            pendingRequests.delete(msg.id);
+          }
+          break;
+        }
+      }
+    });
+
+    modelWorker.addEventListener('error', () => {
+      setModelStatus('error', 'Worker initialisation failed');
+    });
+
+  } catch (_) {
+    setModelStatus('error', 'Web Workers not supported in this browser');
+  }
+}
+
 /**
- * Count how many times a substring appears in a string (case-insensitive).
+ * Send text to worker for DistilBERT classification.
  * @param {string} text
- * @param {string} sub
- * @returns {number}
+ * @returns {Promise<{phishingConf: number, label: string}>}
  */
+function classifyWithAI(text) {
+  return new Promise((resolve, reject) => {
+    if (!modelWorker || !modelReady) {
+      reject(new Error('Model not ready'));
+      return;
+    }
+    const id = ++requestId;
+    pendingRequests.set(id, { resolve, reject });
+    modelWorker.postMessage({ type: 'classify', text, id });
+
+    // 30-second timeout guard
+    setTimeout(() => {
+      if (pendingRequests.has(id)) {
+        pendingRequests.get(id).reject(new Error('Inference timeout'));
+        pendingRequests.delete(id);
+      }
+    }, 30_000);
+  });
+}
+
+/* ============================================================
+   5. Utility Helpers
+   ============================================================ */
+
 function countOccurrences(text, sub) {
   const escaped = sub.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return (text.match(new RegExp(escaped, 'gi')) || []).length;
 }
 
-/**
- * Calculate the percentage of uppercase characters in the text,
- * ignoring non-letter characters.
- * @param {string} text
- * @returns {number} percentage 0–100
- */
 function uppercasePercent(text) {
   const letters = text.replace(/[^a-zA-Z]/g, '');
   if (!letters.length) return 0;
-  const upper  = (text.match(/[A-Z]/g) || []).length;
+  const upper = (text.match(/[A-Z]/g) || []).length;
   return (upper / letters.length) * 100;
 }
 
-/**
- * Clamp a number between min and max.
- * @param {number} val
- * @param {number} min
- * @param {number} max
- * @returns {number}
- */
 function clamp(val, min, max) {
   return Math.min(Math.max(val, min), max);
 }
 
 /* ============================================================
-   4. Core Detection Engine
+   6. Rule-Based Detection Engine
    ============================================================ */
 
-/**
- * @typedef {Object} DetectionResult
- * @property {number}   score       - Raw score 0–10
- * @property {string}   level       - 'safe' | 'warn' | 'danger'
- * @property {string}   label       - Display label
- * @property {string}   summary     - Explanation text
- * @property {Array}    issues      - Array of {icon, text} objects
- * @property {string[]} suggestions - Recommendation strings
- * @property {string[]} flaggedWords - All suspicious words/phrases found (for highlighting)
- */
-
-/**
- * Analyse email text and return a full DetectionResult.
- * @param {string} rawText - Raw email body text
- * @returns {DetectionResult}
- */
-function analyzeEmail(rawText) {
-  const text   = rawText.trim();
-  const lower  = text.toLowerCase();
-  let   score  = 0;
+function analyzeEmailRules(rawText) {
+  const text  = rawText.trim();
+  const lower = text.toLowerCase();
+  let score   = 0;
 
   const issues      = [];
   const suggestions = new Set();
-  const flaggedWords= new Set();
+  const flaggedWords = new Set();
 
-  /* ── Rule 1: Suspicious Keyword Detection ── */
+  /* Rule 1: Keywords */
   let keywordScore = 0;
-
   for (const rule of KEYWORD_RULES) {
     const count = countOccurrences(lower, rule.keyword);
     if (count > 0) {
-      const points = clamp(rule.score * count, 0, rule.score * 2); // cap double occurrences
-      keywordScore += points;
-      issues.push({
-        icon: '🔑',
-        text: `${rule.label} (found ${count}×)`,
-      });
+      keywordScore += clamp(rule.score * count, 0, rule.score * 2);
+      issues.push({ icon: '🔑', text: `${rule.label} (found ${count}×)` });
       flaggedWords.add(rule.keyword);
     }
   }
-  score += clamp(keywordScore, 0, 4); // cap keyword category at 4 pts
+  score += clamp(keywordScore, 0, 4);
 
-  /* ── Rule 2: URL / Link Detection ── */
+  /* Rule 2: URL analysis */
   const urlRegex = /https?:\/\/[^\s"')]+|www\.[^\s"')]+/gi;
-  const urls     = text.match(urlRegex) || [];
+  const urls = text.match(urlRegex) || [];
+
+  /**
+   * Safely extract hostname from a raw URL string.
+   * Falls back to manual splitting when URL constructor isn't available.
+   */
+  function extractDomain(rawUrl) {
+    try {
+      const href = rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`;
+      return new URL(href).hostname.toLowerCase().replace(/^www\./, '');
+    } catch (_) {
+      return rawUrl.split('/')[0].replace(/^www\./, '').toLowerCase();
+    }
+  }
 
   if (urls.length > 0) {
-    const urlScore = clamp(1 + urls.length * 0.4, 0, 2);
-    score += urlScore;
-    issues.push({
-      icon: '🔗',
-      text: `${urls.length} URL(s) detected — could be malicious links`,
-    });
-    suggestions.add('Avoid clicking unknown links — hover to preview URLs before clicking.');
-    // Add the actual matched URL strings for highlighting (not generic prefixes)
+    // Base URL-presence score (unchanged)
+    score += clamp(1 + urls.length * 0.4, 0, 2);
+    issues.push({ icon: '🔗', text: `${urls.length} link(s) found in this email — treat all links with caution` });
+    suggestions.add('Avoid clicking unknown links — hover to preview the real destination before clicking.');
     urls.forEach(url => flaggedWords.add(url));
+
+    /* ── Rule 2a: External Link Identification ── */
+    const uniqueDomains = [...new Set(urls.map(extractDomain))].filter(Boolean);
+    if (uniqueDomains.length > 0) {
+      uniqueDomains.forEach(domain => {
+        issues.push({
+          icon: '🌐',
+          text: `External link detected → goes to: ${domain}`,
+        });
+      });
+      if (uniqueDomains.length > 1) {
+        score += clamp(uniqueDomains.length * 0.3, 0, 1);
+        issues.push({
+          icon: '🌐',
+          text: `${uniqueDomains.length} different external destinations found — legitimate emails rarely link to multiple unrelated domains`,
+        });
+      }
+      suggestions.add('Check every link\'s real destination carefully — the text shown can differ from where the link actually goes.');
+    }
+
+    /* ── Rule 2b: Suspicious Domain Detection ── */
+    let suspiciousDomainScore = 0;
+
+    for (const domain of uniqueDomains) {
+      // 2b-i: IP address used instead of a real domain name
+      if (/^(\d{1,3}\.){3}\d{1,3}$/.test(domain)) {
+        suspiciousDomainScore += 1.5;
+        issues.push({
+          icon: '⛔',
+          text: `Link leads to a raw IP address (${domain}) — real companies always use a proper domain name, not a numeric IP`,
+        });
+        flaggedWords.add(domain);
+      }
+
+      // 2b-ii: Known URL shortener hiding the true destination
+      if (URL_SHORTENERS.some(s => domain === s || domain.endsWith('.' + s))) {
+        suspiciousDomainScore += 1.2;
+        issues.push({
+          icon: '⛔',
+          text: `Shortened link detected (${domain}) — URL shorteners hide the real destination and are commonly used in phishing`,
+        });
+        flaggedWords.add(domain);
+      }
+
+      // 2b-iii: High-risk TLD
+      const domainLower = domain.toLowerCase();
+      const riskyTld = SUSPICIOUS_TLDS.find(tld => domainLower.endsWith(tld));
+      if (riskyTld) {
+        suspiciousDomainScore += 1.0;
+        issues.push({
+          icon: '⛔',
+          text: `Link uses a high-risk domain ending "${riskyTld}" (${domain}) — these are cheap or free and heavily abused by scammers`,
+        });
+        flaggedWords.add(domain);
+      }
+
+      // 2b-iv: Brand lookalike domain (e.g. paypal-login.com, amaz0n.net)
+      const matchedBrand = LOOKALIKE_BRANDS.find(brand => {
+        // Brand appears in domain but domain is NOT exactly <brand>.com/.net/.org etc.
+        const brandInDomain = domainLower.includes(brand);
+        const isOfficialDomain = domainLower === `${brand}.com` ||
+                                  domainLower === `${brand}.net` ||
+                                  domainLower === `${brand}.org` ||
+                                  domainLower === `${brand}.co.uk`;
+        return brandInDomain && !isOfficialDomain;
+      });
+      if (matchedBrand) {
+        suspiciousDomainScore += 1.3;
+        issues.push({
+          icon: '⛔',
+          text: `Lookalike domain detected (${domain}) — it uses the name "${matchedBrand}" to impersonate a trusted brand`,
+        });
+        flaggedWords.add(domain);
+        suggestions.add(`This link pretends to be from ${matchedBrand} but the domain is not the real one. Do not click.`);
+      }
+
+      // 2b-v: Excessive hyphens in domain (common obfuscation trick)
+      const hyphenCount = (domain.match(/-/g) || []).length;
+      if (hyphenCount >= 3) {
+        suspiciousDomainScore += 0.7;
+        issues.push({
+          icon: '⛔',
+          text: `Suspicious domain structure (${domain}) — many hyphens in a domain name are a common sign of a fake site`,
+        });
+        flaggedWords.add(domain);
+      }
+    }
+
+    score += clamp(suspiciousDomainScore, 0, 3);
+    if (suspiciousDomainScore > 0) {
+      suggestions.add('Do not click any links in this email. Go directly to the official website by typing the address yourself.');
+    }
   }
 
-  /* ── Rule 3: Excessive Uppercase ── */
+  /* Rule 3: Uppercase */
   const uppercasePct = uppercasePercent(text);
-
   if (uppercasePct > 50) {
     score += 1.5;
-    issues.push({
-      icon: '🔠',
-      text: `Very high uppercase usage (${uppercasePct.toFixed(0)}%) — commonly used to create false urgency`,
-    });
+    issues.push({ icon: '🔠', text: `Very high uppercase usage (${uppercasePct.toFixed(0)}%) — commonly used to create false urgency` });
   } else if (uppercasePct > 30) {
     score += 0.75;
-    issues.push({
-      icon: '🔠',
-      text: `Elevated uppercase usage (${uppercasePct.toFixed(0)}%)`,
-    });
+    issues.push({ icon: '🔠', text: `Elevated uppercase usage (${uppercasePct.toFixed(0)}%)` });
   }
 
-  /* ── Rule 4: Excessive Exclamation Marks ── */
+  /* Rule 4: Exclamation marks */
   const exclamations = (text.match(/!/g) || []).length;
-
   if (exclamations >= 4) {
     score += 1.0;
-    issues.push({
-      icon: '❗',
-      text: `${exclamations} exclamation marks detected — hallmark of alarm-inducing phishing emails`,
-    });
+    issues.push({ icon: '❗', text: `${exclamations} exclamation marks detected — hallmark of alarm-inducing phishing emails` });
     flaggedWords.add('!');
   } else if (exclamations >= 2) {
     score += 0.4;
-    issues.push({
-      icon: '❗',
-      text: `${exclamations} exclamation marks detected`,
-    });
+    issues.push({ icon: '❗', text: `${exclamations} exclamation marks detected` });
   }
 
-  /* ── Rule 5: Sensitive Information Requests ── */
+  /* Rule 5: Sensitive patterns */
   let sensitiveScore = 0;
-
   for (const rule of SENSITIVE_PATTERNS) {
     if (rule.pattern.test(text)) {
       sensitiveScore += rule.score;
-      issues.push({
-        icon: '🔐',
-        text: rule.label,
-      });
+      issues.push({ icon: '🔐', text: rule.label });
       suggestions.add('Never share sensitive personal or financial information via email.');
     }
   }
   score += clamp(sensitiveScore, 0, 2);
 
-  /* ── Normalise Final Score to 0–10 ── */
   score = clamp(parseFloat(score.toFixed(1)), 0, 10);
 
-  /* ── Classify Risk Level ── */
-  let level, label, summary;
-
-  if (score <= 3) {
-    level   = 'safe';
-    label   = '✅ Safe — Low Risk';
-    summary = score === 0
-      ? 'No suspicious patterns were detected. This email appears to be safe. Always stay cautious and verify the sender if uncertain.'
-      : `Only minor indicators were found (score: ${score}/10). The email is likely safe, but exercise normal caution.`;
-    suggestions.add('Always verify the sender\'s email address, even for emails that appear legitimate.');
-  } else if (score <= 6) {
-    level   = 'warn';
-    label   = '⚠️ Suspicious — Medium Risk';
-    summary = `Several warning signs were detected (score: ${score}/10). Treat this email with caution. Do not click any links or provide any information until you have verified the sender through an independent channel.`;
-    suggestions.add('Contact the sender through a verified phone number or official website to confirm legitimacy.');
-    suggestions.add('Avoid clicking unknown links — hover to preview URLs before clicking.');
-    suggestions.add('Report suspicious emails to your IT security or compliance team.');
-  } else {
-    level   = 'danger';
-    label   = '🚨 Phishing — High Risk';
-    summary = `High phishing risk detected (score: ${score}/10). This email displays multiple classic phishing characteristics. Do NOT interact with any links or attachments and do NOT provide any personal information. Report and delete this email immediately.`;
-    suggestions.add('Do not click any links or download any attachments from this email.');
-    suggestions.add('Never share sensitive personal or financial information via email.');
-    suggestions.add('Report this email to your IT/Security team or use your email provider\'s phishing report button.');
-    suggestions.add('Verify sender identity through an official, independently sourced contact.');
-    suggestions.add('Consider running a security scan on your device if you already interacted with this email.');
-  }
-
-  return {
-    score,
-    level,
-    label,
-    summary,
-    issues,
-    suggestions: [...suggestions],
-    flaggedWords: [...flaggedWords],
-  };
+  return { ruleScore: score, issues, suggestions: [...suggestions], flaggedWords: [...flaggedWords] };
 }
 
 /* ============================================================
-   5. Highlight Engine
+   7. Classification & Hybrid Scoring
    ============================================================ */
 
 /**
- * Escape HTML special characters to prevent XSS.
- * @param {string} text
- * @returns {string}
+ * Build the final classification result from rule and AI scores.
+ *
+ * @param {number} ruleScore     - 0–10
+ * @param {number|null} aiConf   - 0–1 phishing confidence, or null if unavailable
+ * @param {boolean} aiUsed
  */
+function buildClassification(ruleScore, aiConf, aiUsed) {
+  let finalScore;
+  let aiScore = null;
+
+  if (aiUsed && aiConf !== null) {
+    aiScore    = parseFloat((aiConf * 10).toFixed(1));          // scale 0–1 → 0–10
+    finalScore = clamp(parseFloat((ruleScore * 0.55 + aiScore * 0.45).toFixed(1)), 0, 10);
+  } else {
+    finalScore = ruleScore;
+  }
+
+  let level, label, summary;
+
+  if (finalScore <= 3) {
+    level   = 'safe';
+    label   = '✅ Safe — Low Risk';
+    summary = finalScore === 0
+      ? 'No suspicious patterns were detected. This email appears to be safe. Always stay cautious and verify the sender if uncertain.'
+      : `Only minor indicators were found (score: ${finalScore}/10). The email is likely safe, but exercise normal caution.`;
+  } else if (finalScore <= 6) {
+    level   = 'warn';
+    label   = '⚠️ Suspicious — Medium Risk';
+    summary = `Several warning signs were detected (score: ${finalScore}/10). Treat this email with caution. Do not click any links or provide information until you have verified the sender through an independent channel.`;
+  } else {
+    level   = 'danger';
+    label   = '🚨 Phishing — High Risk';
+    summary = `High phishing risk detected (score: ${finalScore}/10). This email displays multiple classic phishing characteristics. Do NOT interact with any links or attachments and do NOT provide any personal information. Report and delete this email immediately.`;
+  }
+
+  return { finalScore, aiScore, level, label, summary };
+}
+
+/**
+ * Build suggestion list combining rule suggestions with level-based defaults.
+ */
+function buildSuggestions(ruleSuggestions, level) {
+  const set = new Set(ruleSuggestions);
+
+  if (level === 'safe') {
+    set.add("Always verify the sender's email address, even for emails that appear legitimate.");
+  } else if (level === 'warn') {
+    set.add('Contact the sender through a verified phone number or official website to confirm legitimacy.');
+    set.add('Avoid clicking unknown links — hover to preview URLs before clicking.');
+    set.add('Report suspicious emails to your IT security or compliance team.');
+  } else {
+    set.add('Do not click any links or download any attachments from this email.');
+    set.add('Never share sensitive personal or financial information via email.');
+    set.add("Report this email to your IT/Security team or use your email provider's phishing report button.");
+    set.add('Verify sender identity through an official, independently sourced contact.');
+    set.add('Consider running a security scan on your device if you already interacted with this email.');
+  }
+  return [...set];
+}
+
+/* ============================================================
+   8. Highlight Engine
+   ============================================================ */
+
 function escapeHtml(text) {
   return text
     .replace(/&/g, '&amp;')
@@ -292,138 +466,141 @@ function escapeHtml(text) {
     .replace(/'/g, '&#039;');
 }
 
-/**
- * Wrap all occurrences of flagged words in the email text with <mark> tags.
- * Builds a single combined regex for efficiency.
- *
- * @param {string}   text        - Original email text
- * @param {string[]} flaggedWords - Words/phrases to highlight
- * @returns {string} HTML string safe to set as innerHTML
- */
 function buildHighlightedHtml(text, flaggedWords) {
-  if (!flaggedWords.length) {
-    return escapeHtml(text);
-  }
+  if (!flaggedWords.length) return escapeHtml(text);
 
-  // Sort by length descending so longer phrases are matched before substrings
   const sorted = [...flaggedWords].sort((a, b) => b.length - a.length);
-
   const escapedParts = sorted.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   const combinedRegex = new RegExp(`(${escapedParts.join('|')})`, 'gi');
-
-  // Escape the whole text first, then restore <mark> tags
-  // We split on the regex to preserve matched text casing
   const parts = text.split(combinedRegex);
 
   return parts.map((part, idx) => {
-    // Odd indices are captured groups (matched words)
-    if (idx % 2 === 1) {
-      return `<mark>${escapeHtml(part)}</mark>`;
-    }
+    if (idx % 2 === 1) return `<mark>${escapeHtml(part)}</mark>`;
     return escapeHtml(part);
   }).join('');
 }
 
 /* ============================================================
-   6. UI Rendering
+   9. Score Breakdown UI
    ============================================================ */
 
-/**
- * Re-render the result section with the DetectionResult data.
- * @param {DetectionResult} result
- */
-function renderResult(result) {
-  /* ── Risk Badge ── */
-  // Remove previous state classes
+function renderScoreBreakdown(ruleScore, aiScore, finalScore, aiUsed) {
+  if (!breakdownPanel) return;
+  breakdownPanel.classList.remove('hidden');
+
+  // Rule bar
+  const ruleBarWidth = (ruleScore / 10) * 100;
+  ruleScoreBar.style.width = `${ruleBarWidth}%`;
+  ruleScoreBar.style.background = scoreToColor(ruleScore);
+  ruleScoreVal.textContent = `${ruleScore} / 10`;
+
+  // AI bar
+  if (aiUsed && aiScore !== null) {
+    aiScoreRow.classList.remove('hidden');
+    const aiBarWidth = (aiScore / 10) * 100;
+    aiScoreBar.style.width = `${aiBarWidth}%`;
+    aiScoreBar.style.background = scoreToColor(aiScore);
+    aiScoreVal.textContent = `${aiScore} / 10`;
+  } else {
+    aiScoreRow.classList.add('hidden');
+  }
+
+  // Hybrid / final bar
+  const hybridWidth = (finalScore / 10) * 100;
+  hybridScoreBar.style.width = `${hybridWidth}%`;
+  hybridScoreBar.style.background = scoreToColor(finalScore);
+  hybridScoreVal.textContent = `${finalScore} / 10`;
+  hybridScoreRow.querySelector('.breakdown-label').innerHTML =
+    aiUsed
+      ? '⚡ Overall Risk Score <span class="breakdown-hint">(combined result)</span>'
+      : '⚡ Overall Risk Score <span class="breakdown-hint">(pattern check only — AI still loading)</span>';
+}
+
+function scoreToColor(score) {
+  if (score <= 3)  return 'var(--clr-safe)';
+  if (score <= 6)  return 'var(--clr-warn)';
+  return 'var(--clr-danger)';
+}
+
+/* ============================================================
+   10. UI Rendering
+   ============================================================ */
+
+function renderResult(ruleResult, classification, aiUsed) {
+  const { ruleScore, issues, flaggedWords } = ruleResult;
+  const { finalScore, aiScore, level, label, summary } = classification;
+  const suggestions = buildSuggestions(ruleResult.suggestions, level);
+
+  /* Risk Badge */
   riskBadge.classList.remove('safe', 'warn', 'danger');
-  riskBadge.classList.add(result.level);
+  riskBadge.classList.add(level);
 
-  // Icon
   const icons = { safe: '🛡️', warn: '⚠️', danger: '🚨' };
-  riskIcon.textContent = icons[result.level];
+  riskIcon.textContent  = icons[level];
+  riskLevel.textContent = label;
+  scoreValue.textContent = finalScore;
 
-  // Label & score
-  riskLevel.textContent = result.label;
-  scoreValue.textContent = result.score;
+  /* Summary */
+  summaryText.textContent = summary;
 
-  /* ── Summary ── */
-  summaryText.textContent = result.summary;
+  /* Score Breakdown */
+  renderScoreBreakdown(ruleScore, aiScore, finalScore, aiUsed);
 
-  /* ── Issues List ── */
+  /* Issues */
   issuesList.innerHTML = '';
-
-  if (result.issues.length === 0) {
+  if (issues.length === 0) {
     const li = document.createElement('li');
     li.className = 'issue-item';
     li.innerHTML = '<span class="issue-icon">✅</span><span class="issue-text">No issues detected.</span>';
     issuesList.appendChild(li);
   } else {
-    result.issues.forEach((issue, index) => {
+    issues.forEach((issue, i) => {
       const li = document.createElement('li');
       li.className = 'issue-item';
-      li.style.animationDelay = `${index * 60}ms`;
-      li.innerHTML = `
-        <span class="issue-icon">${issue.icon}</span>
-        <span class="issue-text">${escapeHtml(issue.text)}</span>
-      `;
+      li.style.animationDelay = `${i * 60}ms`;
+      li.innerHTML = `<span class="issue-icon">${issue.icon}</span><span class="issue-text">${escapeHtml(issue.text)}</span>`;
       issuesList.appendChild(li);
     });
   }
 
-  /* ── Highlighted Email Preview ── */
-  highlightedEmail.innerHTML = buildHighlightedHtml(emailInput.value, result.flaggedWords);
+  /* Highlighted Email */
+  highlightedEmail.innerHTML = buildHighlightedHtml(emailInput.value, flaggedWords);
 
-  /* ── Suggestions ── */
+  /* Suggestions */
   suggestionsList.innerHTML = '';
-
-  result.suggestions.forEach((suggestion, index) => {
+  suggestions.forEach((s, i) => {
     const li = document.createElement('li');
     li.className = 'suggestion-item';
-    li.style.animationDelay = `${index * 60}ms`;
-    li.innerHTML = `
-      <span class="suggestion-icon">💡</span>
-      <span>${escapeHtml(suggestion)}</span>
-    `;
+    li.style.animationDelay = `${i * 60}ms`;
+    li.innerHTML = `<span class="suggestion-icon">💡</span><span>${escapeHtml(s)}</span>`;
     suggestionsList.appendChild(li);
   });
 
-  /* ── Show Section ── */
+  /* Show */
   resultSection.classList.remove('hidden');
-
-  // Smooth scroll to result
   resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 /* ============================================================
-   7. Event Handlers
+   11. Event Handlers
    ============================================================ */
 
-/**
- * Live character counter update.
- */
 emailInput.addEventListener('input', () => {
   const count = emailInput.value.length;
   charCounter.textContent = `${count.toLocaleString()} character${count !== 1 ? 's' : ''}`;
 });
 
-/**
- * Clear button — resets the form and hides results.
- */
 clearBtn.addEventListener('click', () => {
   emailInput.value = '';
   charCounter.textContent = '0 characters';
   resultSection.classList.add('hidden');
+  if (breakdownPanel) breakdownPanel.classList.add('hidden');
   emailInput.focus();
 });
 
-/**
- * Analyze button — runs the detection engine and renders the result.
- * Includes a brief simulated "scanning" delay for UX polish.
- */
-analyzeBtn.addEventListener('click', () => {
+analyzeBtn.addEventListener('click', async () => {
   const text = emailInput.value.trim();
 
-  // Validation — ensure input is not empty
   if (!text) {
     emailInput.focus();
     emailInput.style.border = '1.5px solid var(--clr-danger)';
@@ -435,26 +612,49 @@ analyzeBtn.addEventListener('click', () => {
     return;
   }
 
-  // Show loading state on button
+  /* Loading state */
+  analyzeBtn.disabled = true;
   analyzeBtn.classList.add('loading');
   analyzeBtn.innerHTML = '<span class="btn-icon">⏳</span> Scanning…';
 
-  // Brief delay to simulate analysis (improves perceived responsiveness)
-  setTimeout(() => {
-    const result = analyzeEmail(text);
-    renderResult(result);
+  /* ── Step 1: Run rule engine instantly ── */
+  const ruleResult = analyzeEmailRules(text);
 
-    // Restore button state
-    analyzeBtn.classList.remove('loading');
-    analyzeBtn.innerHTML = '<span class="btn-icon">🔍</span> Analyze Email';
-  }, 600);
+  /* ── Step 2: Attempt AI classification ── */
+  let aiConf   = null;
+  let aiUsed   = false;
+
+  if (modelReady) {
+    try {
+      const aiResult = await classifyWithAI(text);
+      aiConf = aiResult.phishingConf;
+      aiUsed = true;
+    } catch (_) {
+      // AI failed — fall back to rule-only
+      aiUsed = false;
+    }
+  }
+
+  /* ── Step 3: Build hybrid classification ── */
+  const classification = buildClassification(ruleResult.ruleScore, aiConf, aiUsed);
+
+  /* ── Step 4: Render ── */
+  // Brief delay for UX polish (also lets CSS animate in)
+  await new Promise(r => setTimeout(r, 400));
+  renderResult(ruleResult, classification, aiUsed);
+
+  analyzeBtn.disabled = false;
+  analyzeBtn.classList.remove('loading');
+  analyzeBtn.innerHTML = '<span class="btn-icon">🔍</span> Analyze Email';
 });
 
-/**
- * Allow Ctrl+Enter shortcut to trigger analysis.
- */
 emailInput.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
     analyzeBtn.click();
   }
 });
+
+/* ============================================================
+   12. Boot
+   ============================================================ */
+initWorker();

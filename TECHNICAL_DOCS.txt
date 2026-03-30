@@ -1,0 +1,856 @@
+================================================================================
+  PHISHING EMAIL DETECTOR — TECHNICAL BUILD DOCUMENTATION
+  Project: d:\PhishingEmailDetector
+  Stack  : Vanilla HTML5 · Vanilla CSS3 · Vanilla JavaScript (ES2022)
+           Transformers.js 3.5.0 · ONNX Runtime Web · Web Workers API
+================================================================================
+
+
+TABLE OF CONTENTS
+─────────────────
+  1. Project Architecture Overview
+  2. File: index.html
+  3. File: style.css
+  4. File: script.js
+  5. File: model-worker.js
+  6. Detection Engine — Deep Dive
+  7. AI Layer — DistilBERT Inference Pipeline
+  8. Hybrid Scoring Algorithm
+  9. Data Flow — End to End
+ 10. Browser APIs & Web Standards Used
+ 11. Security Considerations
+
+
+════════════════════════════════════════════════════════════════════════════════
+1. PROJECT ARCHITECTURE OVERVIEW
+════════════════════════════════════════════════════════════════════════════════
+
+The application is a 100% client-side, zero-dependency (beyond a CDN-loaded
+library) phishing email analyser. No data is ever transmitted to a server.
+
+HIGH-LEVEL COMPONENT MAP:
+
+  ┌──────────────────────────────────────────────────────────┐
+  │                    BROWSER (Main Thread)                 │
+  │                                                          │
+  │   index.html  ──── loads ──── style.css                  │
+  │       │                                                  │
+  │       └── loads (type="module") ──── script.js           │
+  │                   │                                      │
+  │                   ├── Layer 1: Rule Engine (sync)        │
+  │                   │     analyzeEmailRules()              │
+  │                   │                                      │
+  │                   ├── Layer 2: AI Bridge (async)         │
+  │                   │     classifyWithAI()                 │
+  │                   │            │  postMessage            │
+  │  ┌────────────────┼────────────▼──────────────────────┐  │
+  │  │      Web Worker Thread  (model-worker.js)          │  │
+  │  │                                                    │  │
+  │  │   Transformers.js pipeline()                       │  │
+  │  │   → ONNX Runtime Web (WebAssembly / WebGPU)        │  │
+  │  │   → HuggingFace CDN (model weights, IndexedDB      │  │
+  │  │     cache on subsequent loads)                     │  │
+  │  └────────────────────────────────────────────────────┘  │
+  │                   │  postMessage (result)                │
+  │                   ├── buildClassification() [hybrid]     │
+  │                   └── renderResult() → DOM               │
+  └──────────────────────────────────────────────────────────┘
+
+Two-layer Detection:
+  • Layer 1 (Rule Engine) — runs synchronously, results available in < 10 ms.
+  • Layer 2 (DistilBERT) — runs asynchronously in a Web Worker, non-blocking.
+  • Hybrid Score = 55% Rule Score + 45% AI Score (weighted average).
+  • Graceful degradation: if AI is unavailable, 100% Rule Score is used.
+
+
+════════════════════════════════════════════════════════════════════════════════
+2. FILE: index.html
+════════════════════════════════════════════════════════════════════════════════
+
+Role: Document skeleton and semantic structure.
+
+─── DOCTYPE & Meta Tags ───────────────────────────────────────────────────────
+
+  • charset="UTF-8" — ensures safe rendering of Unicode characters.
+  • viewport meta — enables responsive layout on mobile (width=device-width,
+    initial-scale=1.0 prevents iOS auto-zoom on form inputs).
+  • meta description — SEO-facing description of the application.
+  • <title> — page tab label.
+
+─── Script Loading Strategy ───────────────────────────────────────────────────
+
+  <script type="module" src="script.js">
+
+  CRITICAL DESIGN DECISION: The script is loaded as an ES Module
+  (type="module"). This is required because:
+    a) script.js uses 'use strict' implicitly (all modules are strict).
+    b) model-worker.js is spawned as a Module Worker:
+         new Worker('model-worker.js', { type: 'module' })
+       Module Workers support ES6 `import` statements inside the worker.
+       If the main script were not a module, the Worker type: 'module'
+       would still work, but the module's top-level await semantics
+       wouldn't be available correctly.
+  Scripts placed at the end of <body> also defer parsing inherently.
+
+─── Ambient Background Blobs ──────────────────────────────────────────────────
+
+  Two absolutely-positioned <div class="blob"> elements outside the main
+  container. They receive CSS blur filters and radial gradients to create
+  the ambient glassmorphism background glow — a purely decorative layer.
+  `aria-hidden="true"` removes them from the accessibility tree.
+
+─── Semantic HTML Structure ───────────────────────────────────────────────────
+
+  <header>   — contains app title and subtitle.
+  <main>     — wraps the card (single main landmark per page, SEO-correct).
+  <section>  — input section and result section, each with aria-labelledby.
+  <footer>   — privacy/attribution note.
+
+  The result <section> uses:
+    aria-live="polite"   — screen readers announce result changes after user
+                           finishes current action (non-interruptive).
+    aria-atomic="true"   — the entire region is re-read as a unit on change.
+
+─── Score Breakdown Panel ─────────────────────────────────────────────────────
+
+  Three breakdown rows hardcoded in HTML:
+    #ruleScoreRow   — Suspicious Pattern Check
+    #aiScoreRow     — AI Language Analysis (hidden by default via .hidden)
+    #hybridScoreRow — Overall Risk Score
+
+  Each row contains:
+    .breakdown-label-row  — flexbox row: label left, value right
+    .breakdown-track      — the grey progress bar track (container)
+    .breakdown-bar        — the coloured fill bar (width set via JS inline style)
+
+─── Textarea & Character Counter ──────────────────────────────────────────────
+
+  The <textarea id="emailInput"> has:
+    spellcheck="false"          — disables spell-check (email text may have
+                                  intentional obfuscation).
+    aria-describedby="char-counter" — links counter to input for screen readers.
+  Character counter (#char-counter) updated live via the 'input' event listener.
+
+
+════════════════════════════════════════════════════════════════════════════════
+3. FILE: style.css
+════════════════════════════════════════════════════════════════════════════════
+
+Role: Design system, layout, animations, and state-driven visual feedback.
+All styling uses Vanilla CSS — no framework classes.
+
+─── CSS Custom Properties (Design Tokens) ─────────────────────────────────────
+
+  Defined on :root as CSS variables (--clr-*, --radius-*, --transition):
+
+  Color system:
+    --clr-bg          (#0a0d18)  Deep navy — page background.
+    --clr-surface     (#111627)  Slightly lighter — card/textarea fills.
+    --clr-surface-2   (#171f38)  Hover/footer variants.
+    --clr-accent      (#6c63ff)  Purple — primary CTA and glow effects.
+    --clr-safe        (#22c55e)  Green — safe risk level.
+    --clr-warn        (#f59e0b)  Amber — suspicious risk level.
+    --clr-danger      (#ef4444)  Red — phishing risk level.
+    --clr-highlight   (rgba red) Mark element background for flagged words.
+
+  Spacing tokens: --radius-sm through --radius-xl (6px → 28px, border radii).
+  Transition: --transition (0.22s ease) applied consistently.
+
+─── Reset & Base ──────────────────────────────────────────────────────────────
+
+  Universal box-sizing reset (*, *::before, *::after { box-sizing: border-box })
+  removes all default margin/padding to provide a clean baseline.
+
+─── Ambient Background Blobs (CSS) ────────────────────────────────────────────
+
+  .blob — position: fixed, border-radius: 50%, filter: blur(120px).
+  CSS @keyframes floatBlob — translates + scales blobs on an infinite
+  alternate animation. blob-1 runs 14s, blob-2 runs 18s (different durations
+  prevent visual synchrony, creating an organic feel).
+
+─── Glassmorphism Card ────────────────────────────────────────────────────────
+
+  .card uses:
+    background: rgba(17, 22, 39, 0.7)     — semi-transparent dark fill.
+    backdrop-filter: blur(24px)            — blurs content behind the card.
+    -webkit-backdrop-filter: blur(24px)    — Safari vendor prefix.
+
+  These together produce the "frosted glass" glassmorphism effect.
+
+─── Risk Badge State Classes ──────────────────────────────────────────────────
+
+  #riskBadge receives one of three state classes (.safe, .warn, .danger)
+  injected by JavaScript. CSS uses sibling/descendant selectors to cascade
+  colour changes throughout the badge:
+
+    .risk-badge.safe  → green border + green background tint
+    .risk-badge.warn  → amber border + amber background tint
+    .risk-badge.danger → red border + red background tint
+
+  .risk-level-text and .score-value colors also driven by the parent state:
+    .risk-badge.safe .risk-level-text { color: var(--clr-safe); }
+    etc.
+
+─── Score Breakdown Bars ──────────────────────────────────────────────────────
+
+  .breakdown-track — fixed-height 8px grey track.
+  .breakdown-bar   — width starts at 0%, transitioned via CSS:
+    transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1)
+
+  The easing function (cubic-bezier) produces an "ease-out spring" effect —
+  fast start, decelerating end — making progress bars feel physical.
+  Width is set by JS as inline style after render, triggering the transition.
+
+─── Shimmer Animation (Model Loading) ────────────────────────────────────────
+
+  .model-status--loading::after uses a pseudo-element with:
+    background: linear-gradient(90deg, transparent, rgba(white,0.06), transparent)
+    animation: shimmer 1.8s linear infinite
+
+  The shimmer sweeps from -100% to +200% translateX, creating a "skeleton
+  screen" loading indicator familiar from modern UI patterns.
+
+─── Animations ────────────────────────────────────────────────────────────────
+
+  @keyframes fadeSlideIn   — result section entrance (opacity + translateY).
+  @keyframes fadeIn        — issue/suggestion list item entrance (opacity + translateX).
+  @keyframes floatBlob     — ambient background blob float.
+  @keyframes pulseGlow     — header shield icon box-shadow pulse.
+  @keyframes shimmer       — horizontal sweep for loading states.
+
+  Issue items use `animation-delay` set from JavaScript (i * 60ms) to
+  stagger their entrance — a cascade animation technique.
+
+─── Responsive Layout ─────────────────────────────────────────────────────────
+
+  @media (max-width: 600px) overrides:
+    - header stacks vertically (flex-direction: column).
+    - card reduces padding.
+    - btn-primary becomes full-width (width: 100%).
+    - textarea minimum height reduced.
+
+─── .hidden Utility Class ─────────────────────────────────────────────────────
+
+  .hidden { display: none !important; }
+  !important ensures this single-purpose utility class always wins
+  specificity battles. Used for toggling the result section and breakdown rows.
+
+
+════════════════════════════════════════════════════════════════════════════════
+4. FILE: script.js
+════════════════════════════════════════════════════════════════════════════════
+
+Role: Application logic — rule engine, AI bridge, hybrid scoring, rendering.
+Execution context: Browser main thread (ES Module).
+
+─── 'use strict' Mode ─────────────────────────────────────────────────────────
+
+  Enforces strict mode at module scope. Prevents accidental global variable
+  creation, disallows duplicate parameter names, and makes silent JS errors
+  throw exceptions — important for a security-focused tool.
+
+─── Section 1: Detection Rule Constants ───────────────────────────────────────
+
+  KEYWORD_RULES (Array of Objects)
+    Each object: { keyword: string, score: number, label: string }
+    16 rules covering social engineering tactics: urgency manufacture
+    ("urgent", "act now"), credential harvesting ("verify account",
+    "password"), prize bait ("winner", "congratulations"), etc.
+    Scores range 0.4–1.0 per match.
+
+  SENSITIVE_PATTERNS (Array of Objects)
+    Each object: { pattern: RegExp, score: number, label: string }
+    7 regex patterns matching personally identifiable information (PII)
+    and financial data requests: SSN, credit card, bank account,
+    PIN, date of birth, login credentials.
+    Uses /i flag for case-insensitive matching.
+    Uses \b word boundaries to avoid false positives (e.g. "pinch").
+
+  SUSPICIOUS_TLDS (Array of Strings)
+    16 top-level domain strings known for high abuse rates:
+    Freenom free TLDs (.tk, .ml, .ga, .cf, .gq) and cheap abuse-prone
+    extensions (.xyz, .top, .win, .download, .loan, etc.).
+
+  URL_SHORTENERS (Array of Strings)
+    14 known URL-shortening service domains (bit.ly, tinyurl.com, etc.)
+    used by phishers to obfuscate final redirect destinations.
+
+  LOOKALIKE_BRANDS (Array of Strings)
+    20 commonly impersonated brand names (paypal, amazon, microsoft,
+    google, netflix, banking institutions, shipping carriers, irs).
+    Used for lookalike domain detection — searching if a brand keyword
+    appears in a domain that is NOT the official brand domain.
+
+─── Section 2: DOM Element References ─────────────────────────────────────────
+
+  All DOM elements cached at module parse time via getElementById().
+  Caching avoids repeated DOM traversal during rendering — a performance
+  best practice (DOM queries are expensive relative to variable access).
+
+─── Section 3: Web Worker — DistilBERT Bridge ─────────────────────────────────
+
+  Variables:
+    modelWorker    — Worker instance (or null before init).
+    modelReady     — Boolean flag, set to true when worker posts 'ready'.
+    requestId      — Monotonically incrementing integer; each inference
+                     request gets a unique ID to match responses.
+    pendingRequests — Map<id, {resolve, reject}> — a request-response
+                     correlation registry. Implements the Async Request/
+                     Response pattern over a message-passing channel.
+
+  initWorker():
+    Spawns: new Worker('model-worker.js', { type: 'module' })
+    Registers two listeners on the worker:
+      'message' — dispatches based on msg.type:
+        'progress' — no-op (model status badge removed from UI).
+        'ready'    — sets modelReady = true.
+        'result'   — looks up the pending promise resolver by ID, resolves it.
+        'error'    — if id === -1, boot failure; else rejects queued promise.
+      'error'   — catches unhandled worker exceptions.
+
+  classifyWithAI(text):
+    Returns a Promise. Wraps the message-passing channel in a Promise
+    interface so call sites can use async/await.
+    Posts: { type: 'classify', text, id } to the worker.
+    Registers resolve/reject in pendingRequests[id].
+    Sets a 30-second timeout guard — if no response arrives, the promise
+    is rejected with 'Inference timeout' and the pending entry is cleaned up.
+    This prevents memory leaks from dangling unresolved promises.
+
+─── Section 4 (Removed): Model Status Badge ───────────────────────────────────
+
+  Originally a setModelStatus() function that updated a visual badge.
+  Removed per user request — badge was not needed in the final UI.
+  Worker messaging still functions internally; only the visual feedback
+  was stripped.
+
+─── Section 5: Utility Helpers ────────────────────────────────────────────────
+
+  countOccurrences(text, sub):
+    Escapes regex special characters in 'sub' using the standard
+    replace(/[.*+?^${}()|[\]\\]/g, '\\$&') idiom, then creates a
+    global+case-insensitive RegExp. Returns match array length.
+    Used by keyword rule loop to count repeated occurrences (e.g. the
+    word "urgent" 3× scores more than once).
+
+  uppercasePercent(text):
+    Strips non-letter characters first, then divides uppercase letter
+    count by total letter count. Returns a percentage 0–100.
+    Used to detect ALL-CAPS phishing emails designed to alarm recipients.
+
+  clamp(val, min, max):
+    Math.min(Math.max(val, min), max).
+    Applied pervasively to enforce score category ceilings and prevent
+    one category from dominating the total score unfairly.
+
+─── Section 6: Rule Engine — analyzeEmailRules(rawText) ───────────────────────
+
+  Input  : Raw email body string from textarea.
+  Output : { ruleScore, issues, suggestions, flaggedWords }
+
+  Internal state:
+    score        — running float accumulator.
+    issues       — Array of { icon, text } objects for the Issues panel.
+    suggestions  — Set<string> (deduplicates recommendations automatically).
+    flaggedWords — Set<string> (deduplicates terms to highlight).
+
+  RULE 1 — Keyword Detection (cap: 4 pts)
+    Iterates KEYWORD_RULES. For each keyword, calls countOccurrences()
+    on the lowercased text. Score per rule is clamped at 2× the base
+    score (discourages gaming with extreme repetition).
+    Passes through clamp(keywordScore, 0, 4) — keyword category ceiling.
+
+  RULE 2 — URL Analysis (cap: 2 pts base + up to 3 pts suspicious)
+
+    Step 2-0: URL Extraction
+      Regex: /https?:\/\/[^\s"')]+|www\.[^\s"')]+/gi
+      Matches both protocol-prefixed URLs (http:// / https://) and
+      bare www. URLs. The character class [^\s"')] excludes common
+      URL terminators in email text.
+      All matched URL strings pushed to flaggedWords for highlighting.
+
+    Step 2-0: extractDomain(rawUrl) — inner utility function
+      Uses the native URL constructor: new URL(href).hostname
+      Strips 'www.' prefix via .replace(/^www\./, '') for normalisation.
+      Falls back to manual string split if URL constructor throws
+      (e.g. malformed URL).
+
+    Step 2a: External Link Identification
+      Derives uniqueDomains = deduplicated array of extracted hostnames.
+      Emits one issue entry per unique domain: "External link detected
+      → goes to: <domain>". This makes destination transparency explicit.
+      If multiple distinct domains found: additional score (0.3 × count,
+      capped at 1 pt) + additional issue flagging the anomaly.
+
+    Step 2b: Suspicious Domain Detection
+      Iterates uniqueDomains. For each domain, checks sub-rules:
+
+      2b-i: IP Address Pattern
+        Regex: /^(\d{1,3}\.){3}\d{1,3}$/
+        Matches raw IPv4 addresses. Legitimate organisations always use
+        named domains. Score: +1.5 pts.
+
+      2b-ii: URL Shortener
+        Array.some() check against URL_SHORTENERS list.
+        Also checks subdomain variants (domain.endsWith('.' + shortener)).
+        Score: +1.2 pts.
+
+      2b-iii: High-Risk TLD
+        Array.find() on SUSPICIOUS_TLDS using String.endsWith().
+        Score: +1.0 pt. Reports exact TLD in the issue text.
+
+      2b-iv: Brand Lookalike Domain
+        LOOKALIKE_BRANDS.find() with two conditions:
+          - brand keyword appears somewhere in the domain string.
+          - domain is NOT an exact match to the official domain
+            (brand.com, brand.net, brand.org, brand.co.uk).
+        This catches paypal-secure.com, amazon-login.net, etc.
+        Score: +1.3 pts. Generates a brand-specific suggestion.
+
+      2b-v: Excessive Hyphens
+        Counts all '-' characters in domain via /[-]/g.
+        Threshold: >= 3 hyphens. Real company domains rarely exceed 1.
+        Score: +0.7 pts.
+
+      suspiciousDomainScore clamped to 3 pts maximum.
+
+  RULE 3 — Uppercase Detection
+    uppercasePercent() thresholds:
+      > 50% → +1.5 pts (Very high — alarm-inducing ALL CAPS)
+      > 30% → +0.75 pts (Elevated — some shouting)
+
+  RULE 4 — Exclamation Mark Count
+    Regex /!/g counts total '!' characters.
+    >= 4 → +1.0 pt; >= 2 → +0.4 pts.
+    Threshold of 4 chosen because legitimate transactional/business
+    emails almost never contain this many exclamation marks.
+
+  RULE 5 — Sensitive Information Patterns (cap: 2 pts)
+    Iterates SENSITIVE_PATTERNS. For each, calls RegExp.test() on the
+    original text (preserving case for patterns that need it).
+    Each match: +score, adds a security recommendation to the Set.
+    sensitiveScore clamped to 2 pts.
+
+  Final normalisation:
+    score = clamp(parseFloat(score.toFixed(1)), 0, 10)
+    toFixed(1) prevents floating-point accumulation noise
+    (e.g. 6.999999999 → 7.0). Clamped to [0, 10] range.
+
+─── Section 7: buildClassification(ruleScore, aiConf, aiUsed) ─────────────────
+
+  Computes the hybrid final score and risk classification tier.
+
+  When AI is available:
+    aiScore    = aiConf × 10         (scales 0–1 probability → 0–10)
+    finalScore = ruleScore × 0.55 + aiScore × 0.45
+
+  When AI is unavailable:
+    finalScore = ruleScore           (pure rule score, 100% weight)
+
+  Risk tiers:
+    0 – 3.0  → 'safe'   (Low Risk)
+    3.1 – 6.0 → 'warn'   (Suspicious — Medium Risk)
+    6.1 – 10  → 'danger' (Phishing — High Risk)
+
+─── Section 7b: buildSuggestions(ruleSuggestions, level) ──────────────────────
+
+  Merges rule-specific suggestions (collected during rule evaluation
+  using Set deduplication) with tier-specific default recommendations.
+  Uses a Set internally so duplicate suggestions from multiple rules
+  never appear twice. Returns array for iteration in renderResult().
+
+─── Section 8: Highlight Engine ───────────────────────────────────────────────
+
+  escapeHtml(text):
+    Replaces &, <, >, ", ' with their HTML entity equivalents.
+    Mandatory before injecting any user-supplied text as innerHTML.
+    Prevents XSS (Cross-Site Scripting) attacks where an email body
+    containing <script> tags could execute arbitrary code.
+
+  buildHighlightedHtml(text, flaggedWords):
+    Builds a single combined RegExp from all flaggedWords.
+    Sort flaggedWords by descending length FIRST — this ensures longer
+    phrases (e.g. "verify your account") are matched before their
+    substrings ("verify"), preventing incorrect partial wrapping.
+    Uses String.split(combinedRegex) — when a RegExp with capture groups
+    is passed to split(), captured groups are preserved in the result array
+    at odd indices. Only odd-index parts are wrapped in <mark> tags.
+    Even-index parts (non-matching text) are HTML-escaped.
+    This technique avoids iterative replace() calls which could double-
+    wrap text or corrupt partially-overlapping matches.
+
+─── Section 9: renderScoreBreakdown(ruleScore, aiScore, finalScore, aiUsed) ───
+
+  Removes 'hidden' from the breakdown panel.
+  For each bar: computes width as (score / 10) * 100 (percentage).
+  Sets .style.width inline — triggers the CSS transition (the bar
+  animates from 0% to the target width on first render).
+  scoreToColor(score) maps score to the appropriate CSS variable.
+  AI row shown/hidden based on aiUsed flag.
+  Hybrid label text rewritten via innerHTML to reflect whether AI
+  was available for the current analysis run.
+
+─── Section 10: renderResult(ruleResult, classification, aiUsed) ──────────────
+
+  Master render function. Orchestrates:
+    1. Risk badge state class mutation (.safe/.warn/.danger).
+    2. Score display update.
+    3. Summary text update.
+    4. Score breakdown panel render.
+    5. Issues list rebuild via DOM API (createElement, appendChild).
+       Animation delays staggered: each li.style.animationDelay = i × 60ms.
+    6. Highlighted email preview via innerHTML = buildHighlightedHtml().
+    7. Suggestions list rebuild.
+    8. resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' })
+       — smooth-scrolls the viewport to the result on smaller screens.
+
+─── Section 11: Event Handlers ────────────────────────────────────────────────
+
+  emailInput 'input' event:
+    Live character counter. Uses .toLocaleString() for thousand separators.
+    Handles singular/plural: "1 character" vs "2 characters".
+
+  clearBtn 'click' event:
+    Resets textarea value, counter, hides result section and breakdown panel.
+    Calls emailInput.focus() — returns keyboard focus to input.
+
+  analyzeBtn 'click' event (async):
+    Step 0: Validate non-empty input. If empty, applies a red border + glow
+            via inline style, cleared by setTimeout(1800ms).
+    Step 1: Disable button + add .loading class (CSS opacity 0.75,
+            pointer-events: none). Updates innerHTML to show hourglass.
+    Step 2: analyzeEmailRules(text) — synchronous, immediate.
+    Step 3: if (modelReady) { await classifyWithAI(text) }
+            Wrapped in try/catch — AI failure silently degrades to rule-only.
+    Step 4: buildClassification() — combines scores.
+    Step 5: await new Promise(r => setTimeout(r, 400)) — intentional 400ms
+            UX delay. Without this, results flash in faster than the user
+            can register the analysis happened. The loading state becomes
+            visible and the transition feels deliberate.
+    Step 6: renderResult(). Restore button.
+
+  emailInput 'keydown' event:
+    Ctrl+Enter (or Cmd+Enter on Mac) triggers analyzeBtn.click().
+    Checks both e.ctrlKey and e.metaKey for cross-platform compatibility.
+
+─── Section 12: Boot Sequence ─────────────────────────────────────────────────
+
+  initWorker() is called at module evaluation time (bottom of file).
+  This means the Worker is spawned and DistilBERT begins loading
+  immediately when the page loads — in parallel with the user reading
+  the interface and composing their input. By the time a typical user
+  pastes an email and clicks Analyze, the model is already loaded.
+
+
+════════════════════════════════════════════════════════════════════════════════
+5. FILE: model-worker.js
+════════════════════════════════════════════════════════════════════════════════
+
+Role: Isolated background thread for ML model loading and inference.
+Execution context: Web Worker thread (ES Module Worker).
+
+─── Why a Web Worker? ─────────────────────────────────────────────────────────
+
+  DistilBERT inference on CPU/WASM can take 500ms–2000ms per call.
+  Running this on the main thread would freeze the UI entirely during
+  inference (JavaScript is single-threaded). Web Workers run in a
+  parallel OS thread with a separate event loop, keeping the UI
+  at 60fps during inference.
+
+─── Import & Configuration ────────────────────────────────────────────────────
+
+  import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.0'
+
+  Loaded via ES Module import — the worker's `type: 'module'` flag enables this.
+  Version pinned to 3.5.0 for reproducibility; wildcard versions can introduce
+  breaking changes silently.
+
+  env.allowLocalModels = false  — forces model only from HuggingFace Hub CDN.
+  env.useBrowserCache  = true   — model weights cached to IndexedDB (Cache API)
+                                  after first download. Subsequent page loads
+                                  are instant — model loads from local storage.
+
+─── MODEL_ID ──────────────────────────────────────────────────────────────────
+
+  'Xenova/distilbert-base-uncased-finetuned-sst-2-english'
+
+  This is a DistilBERT model (distilled version of BERT — 40% smaller,
+  60% faster, 97% of BERT's performance) fine-tuned on the SST-2
+  (Stanford Sentiment Treebank v2) dataset for binary sentiment
+  classification: POSITIVE vs NEGATIVE.
+
+  BERT Architecture:
+    - Bidirectional Encoder Representations from Transformers.
+    - Processes all tokens simultaneously (unlike RNNs).
+    - Uses self-attention to capture contextual relationships between
+      all word pairs in a sequence.
+
+  DistilBERT Differences:
+    - 6 transformer layers (vs 12 in BERT-base).
+    - 66M parameters (vs 110M in BERT-base).
+    - Trained using knowledge distillation from BERT-base.
+
+  SST-2 Fine-tuning:
+    - Model is trained to classify sentences as Positive or Negative.
+    - Phishing emails, by design, use alarming, threatening, negative-
+      sentiment language to invoke fear and urgency.
+    - NEGATIVE confidence score correlates strongly with phishing tone.
+
+─── loadModel() — Async Boot ──────────────────────────────────────────────────
+
+  Calls Transformers.js pipeline() factory function:
+    pipeline(task, modelId, options)
+
+  Arguments:
+    task     = 'text-classification'  — loads model + tokenizer configured
+                                        for sequence classification.
+    modelId  = MODEL_ID               — HuggingFace Hub identifier.
+    options.quantized = true          — loads the int8-quantized ONNX export
+                                        (~17MB) instead of float32 (~68MB).
+                                        4× smaller without meaningful accuracy
+                                        loss for binary classification.
+    options.progress_callback         — fired by Transformers.js during weight
+                                        download with { status, progress, file }
+                                        objects.
+
+  On success: posts { type: 'ready' } to main thread.
+  On error:   posts { type: 'error', id: -1, message } (id -1 = boot error).
+
+─── Message Handler — self.addEventListener('message') ────────────────────────
+
+  Destructures event.data: { type, text, id }
+
+  Guard: if classifier is null (model not loaded), returns error immediately.
+
+  Inference:
+    text.slice(0, 1800) — truncates input. DistilBERT has a 512-token
+    limit. Average English has ~4 characters/token, so 1800 chars ≈ 450
+    tokens — safely under the limit while preserving most email content.
+
+    const [result] = await classifier(truncated)
+    Returns array of { label: 'POSITIVE'|'NEGATIVE', score: number }
+    Destructured to first element directly.
+
+  Phishing confidence mapping:
+    const isNegative = result.label === 'NEGATIVE'
+    const phishingConf = isNegative ? rawConf : (1 - rawConf)
+
+    Rationale: The model returns confidence for the PREDICTED label.
+    If prediction is NEGATIVE with 0.92 confidence → phishingConf = 0.92.
+    If prediction is POSITIVE with 0.85 confidence → phishingConf = 0.15.
+    This normalises both output cases to a single 0–1 phishing probability.
+
+  Posts { type: 'result', id, label, score, phishingConf } back to main thread.
+  The id field enables the main thread's pendingRequests Map to route the
+  result to the correct awaiting Promise.
+
+
+════════════════════════════════════════════════════════════════════════════════
+6. DETECTION ENGINE — DEEP DIVE
+════════════════════════════════════════════════════════════════════════════════
+
+Score composition (maximum 10 pts):
+
+  Category                   Max Score   Method
+  ─────────────────────────────────────────────────────────
+  Rule 1: Keywords              4.0 pts   Weighted accumulation + clamp
+  Rule 2: URL presence          2.0 pts   log-linear: 1 + count × 0.4
+  Rule 2a: Multiple domains     1.0 pts   0.3 × domain count + clamp
+  Rule 2b: Suspicious domains   3.0 pts   Per-domain checks + clamp
+  Rule 3: Uppercase ratio       1.5 pts   Threshold steps (30%, 50%)
+  Rule 4: Exclamation marks     1.0 pts   Threshold steps (2, 4)
+  Rule 5: Sensitive PII         2.0 pts   Pattern matches + clamp
+  ─────────────────────────────────────────────────────────
+  Theoretical max raw:         14.5 pts   → clamped to 10.0 by final clamp
+
+The final clamp(score, 0, 10) ensures the score is always in the display
+range regardless of how many rules trigger simultaneously.
+
+Deduplication:
+  Both issues and suggestions use Set objects for automatic deduplication.
+  This prevents duplicate issues if two rules trigger on the same root cause.
+
+
+════════════════════════════════════════════════════════════════════════════════
+7. AI LAYER — DISTILBERT INFERENCE PIPELINE
+════════════════════════════════════════════════════════════════════════════════
+
+Transformers.js Runtime Stack:
+
+  JavaScript API (pipeline)
+       ↓
+  ONNX Runtime Web (ort-web)
+       ↓
+  WebAssembly (WASM) execution engine
+       ↓  (or WebGPU on supported browsers for GPU acceleration)
+  CPU thread / GPU shader
+
+ONNX (Open Neural Network Exchange):
+  A standardised model representation format. HuggingFace's `optimum`
+  library was used offline to export the PyTorch DistilBERT weights to
+  ONNX format. Transformers.js downloads this ONNX file and passes it
+  to ONNX Runtime Web for execution.
+
+Tokenisation:
+  Transformers.js automatically downloads and applies the DistilBERT
+  WordPiece tokeniser. Input text is tokenised into subword units,
+  special tokens ([CLS], [SEP]) are prepended/appended, and token IDs
+  are passed to the ONNX model as a tensor.
+
+Caching strategy:
+  On first load, model weights download from:
+  https://huggingface.co/Xenova/distilbert-base-uncased-finetuned-sst-2-english
+
+  Cached to browser IndexedDB (via Cache API). On subsequent visits,
+  Transformers.js reads weights from IndexedDB, avoiding network requests.
+  Size with quantized=true: ~17MB total.
+
+
+════════════════════════════════════════════════════════════════════════════════
+8. HYBRID SCORING ALGORITHM
+════════════════════════════════════════════════════════════════════════════════
+
+  finalScore = (ruleScore × 0.55) + (aiScore × 0.45)
+
+Weight rationale:
+  Rule engine weighted slightly higher (55%) because:
+    a) It produces deterministic, explainable outputs correlated to known
+       phishing tactics.
+    b) SST-2 fine-tuning is on general sentiment, not phishing-specific
+       text — the rule engine provides domain-specific signal.
+  AI weighted at 45% because:
+    a) It captures semantic tone beyond keyword matching (e.g. a cleverly
+       worded phishing email without explicit keywords still reads as
+       threatening/alarming).
+    b) It handles paraphrasing, synonyms, and grammatical variants that
+       simple keyword rules miss.
+
+Graceful fallback:
+  If modelReady === false when Analyze is clicked:
+    finalScore = ruleScore (100% weight)
+  The application is fully functional without the AI layer.
+
+
+════════════════════════════════════════════════════════════════════════════════
+9. DATA FLOW — END TO END
+════════════════════════════════════════════════════════════════════════════════
+
+  1. User pastes email text into #emailInput textarea.
+  2. 'input' event fires → live character count update.
+  3. User clicks "Analyze Email" (or Ctrl+Enter).
+  4. analyzeBtn click handler validates non-empty input.
+  5. analyzeEmailRules(text) executes synchronously:
+       a. Keyword scan → keywordScore accumulated.
+       b. URL extraction → extractDomain() per URL.
+       c. External domain listing → issues per domain.
+       d. Suspicious domain checks → per-domain sub-rules.
+       e. Uppercase percentage calculation.
+       f. Exclamation mark count.
+       g. Sensitive pattern regex tests.
+       h. Returns { ruleScore, issues, suggestions, flaggedWords }.
+  6. if (modelReady):
+       postMessage('classify') → Worker thread.
+       Worker tokenises + runs ONNX inference → phishingConf result.
+       postMessage('result') → Main thread promise resolves.
+  7. buildClassification(ruleScore, aiConf, aiUsed):
+       Computes hybrid finalScore.
+       Determines risk tier (safe/warn/danger).
+       Returns { finalScore, aiScore, level, label, summary }.
+  8. 400ms intentional delay (setTimeout).
+  9. renderResult():
+       a. Risk badge state class applied.
+       b. Score value displayed.
+       c. Summary text updated.
+       d. renderScoreBreakdown() — bar widths set, CSS transition fires.
+       e. Issues list rebuilt (createElement loop with staggered delays).
+       f. buildHighlightedHtml() wraps flaggedWords in <mark> tags.
+       g. Suggestions list rebuilt.
+       h. scrollIntoView() called.
+ 10. Button re-enabled. Analysis complete.
+
+
+════════════════════════════════════════════════════════════════════════════════
+10. BROWSER APIs & WEB STANDARDS USED
+════════════════════════════════════════════════════════════════════════════════
+
+  Core Web APIs:
+    document.getElementById()          — O(1) DOM element lookup by ID.
+    element.classList (add/remove)     — CSS class manipulation.
+    element.style.*                    — Inline style for dynamic bar widths.
+    element.innerHTML / textContent    — DOM content mutation.
+    document.createElement()           — Programmatic element creation.
+    element.appendChild()              — DOM insertion.
+    element.scrollIntoView()           — Smooth scroll to result section.
+    element.addEventListener()         — Event registration.
+    element.focus()                    — Programmatic focus management.
+
+  Web Workers API:
+    new Worker(url, { type: 'module' }) — ES Module Worker instantiation.
+    worker.postMessage(data)           — Structured clone algorithm for msg.
+    worker.addEventListener('message') — Response reception.
+    self.postMessage() inside worker   — Worker-to-main communication.
+
+  URL API:
+    new URL(href).hostname             — Native URL parsing for domain extraction.
+
+  Timing:
+    setTimeout()                       — Non-blocking delays, validation timeout.
+
+  ES2022 Language Features:
+    async/await                        — Async control flow over Promises.
+    const/let                          — Block-scoped declarations.
+    Arrow functions                    — Concise function expressions.
+    Template literals                  — String interpolation.
+    Destructuring assignment           — const { type, text, id } = event.data.
+    Spread operator                    — [...new Set(arr)] deduplication.
+    Optional chaining (none needed)    — All elements checked for null explicitly.
+    Array methods: .map(), .filter(), .find(), .some(), .forEach(), .sort()
+    Set                                — Deduplicated collections for suggestions/flaggedWords.
+    Map                                — pendingRequests correlation registry.
+    RegExp                             — Pattern matching throughout.
+
+  CSS Features:
+    Custom Properties (CSS Variables)  — Design token system.
+    backdrop-filter: blur()            — Glassmorphism.
+    CSS Transitions                    — Smooth property animations.
+    CSS Animations (@keyframes)        — Entrance/loading animations.
+    CSS Grid & Flexbox                 — Layout engine.
+    clamp() (CSS function)             — Responsive font sizing.
+    Pseudo-elements (::after)          — Shimmer overlay.
+    Media Queries                      — Responsive breakpoints.
+
+
+════════════════════════════════════════════════════════════════════════════════
+11. SECURITY CONSIDERATIONS
+════════════════════════════════════════════════════════════════════════════════
+
+  XSS Prevention:
+    All user-supplied email text that is injected into the DOM as innerHTML
+    is first passed through escapeHtml(), which HTML-encodes the five
+    dangerous characters: & < > " '
+    This prevents any HTML or JavaScript in the pasted email from executing.
+
+  No Data Exfiltration:
+    The application makes zero network requests with user data.
+    The only network traffic is fetching model weights from CDN on first load.
+    All parsing, scoring, and inference happens in the local browser process.
+
+  Content Security:
+    Model loaded from a pinned CDN version (jsDelivr @3.5.0) — no wildcard.
+    Worker uses `allowLocalModels = false` to prevent loading arbitrary
+    local files as models.
+
+  Input Validation:
+    Empty input is rejected before analysis begins.
+    Input is trimmed before processing to avoid whitespace-only submissions.
+    Text is sliced to 1800 chars before being sent to the model — preventing
+    extremely large inputs from causing WASM memory issues.
+
+  Memory Management:
+    pendingRequests Map entries are deleted after resolution or rejection.
+    The 30-second inference timeout prevents unbounded Map growth if a
+    worker response is lost.
+
+================================================================================
+END OF DOCUMENTATION
+================================================================================
